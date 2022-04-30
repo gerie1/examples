@@ -6,6 +6,7 @@
 ###############################################################################
 import argparse
 import torch
+import sys
 
 import data
 
@@ -18,7 +19,7 @@ parser.add_argument('--checkpoint', type=str, default='./model.pt',
 parser.add_argument('--outf', type=str, default='generated.txt',
                     help='output file for generated text')
 parser.add_argument('--words', type=int, default='1000',
-                    help='number of words to generate')
+                    help='number of words to generate (words in the prompt are part of the total number)')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
@@ -27,7 +28,27 @@ parser.add_argument('--temperature', type=float, default=1.0,
                     help='temperature - higher will increase diversity')
 parser.add_argument('--log-interval', type=int, default=100,
                     help='reporting interval')
+parser.add_argument('--input', type=str,
+                    help='input sequence with quotation marks')
 args = parser.parse_args()
+
+corpus = data.Corpus(args.data)
+
+input_count = 0
+
+# Check if input sequence fulfills requirements
+if args.input:
+    sequence = args.input
+    word_list = sequence.split()
+    input_count = len(word_list)
+    if args.words > input_count:
+        args.words = args.words - input_count
+        for word in word_list:
+            if word not in corpus.dictionary.word2idx:
+                sys.exit("One of the input words is not part of the vocabulary.")
+    else:
+        sys.exit("Your input sequence exceeds the number of words to generate.")
+
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
@@ -44,15 +65,23 @@ with open(args.checkpoint, 'rb') as f:
     model = torch.load(f, map_location=device)
 model.eval()
 
-corpus = data.Corpus(args.data)
 ntokens = len(corpus.dictionary)
 
 is_transformer_model = hasattr(model, 'model_type') and model.model_type == 'Transformer'
 if not is_transformer_model:
     hidden = model.init_hidden(1)
-input = torch.randint(ntokens, (1, 1), dtype=torch.long).to(device)
 
 with open(args.outf, 'w') as outf:
+
+    # Provide user input to hidden layers
+    if args.input:
+        for word in word_list:
+            input = torch.tensor([[corpus.dictionary.word2idx[word]]]).long().to(device)
+            output, hidden = model(input, hidden)
+            outf.write(word + ' ')
+
+    input = torch.randint(ntokens, (1, 1), dtype=torch.long).to(device)
+
     with torch.no_grad():  # no tracking history
         for i in range(args.words):
             if is_transformer_model:
@@ -69,7 +98,10 @@ with open(args.outf, 'w') as outf:
 
             word = corpus.dictionary.idx2word[word_idx]
 
-            outf.write(word + ('\n' if i % 20 == 19 else ' '))
+            if args.input:
+                outf.write(word + ('\n' if (i+input_count) % 20 == 19 else ' '))
+            else:
+                outf.write(word + ('\n' if i % 20 == 19 else ' '))
 
             if i % args.log_interval == 0:
-                print('| Generated {}/{} words'.format(i, args.words))
+                print('| Generated {}/{} words'.format(i, args.words+input_count))
